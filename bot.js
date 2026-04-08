@@ -33,11 +33,6 @@ async function connectDB() {
   console.log("✅ MongoDB connected");
 }
 
-// ====== MARKDOWN ESCAPE ======
-function escapeMarkdown(text) {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, "\\$&");
-}
-
 // ====== HELPERS ======
 const isAdmin = (id) => ADMIN_IDS.includes(id);
 
@@ -115,7 +110,10 @@ async function setLastMessage(text) {
 async function checkStock() {
   try {
     const wishlistId = await getWishlist();
-    if (!wishlistId) return [];
+    if (!wishlistId) {
+      console.log("⚠️ No wishlist set");
+      return [];
+    }
 
     const url = `https://www.amazon.in/hz/wishlist/ls/${wishlistId}`;
 
@@ -141,6 +139,8 @@ async function checkStock() {
       }
     });
 
+    console.log("🧪 Scraped results:", results);
+
     return results;
 
   } catch (e) {
@@ -149,7 +149,7 @@ async function checkStock() {
   }
 }
 
-// ====== BUILD MESSAGE ======
+// ====== BUILD MESSAGE (FOR AUTO SEND ONLY) ======
 async function buildMessage() {
   const products = await getProducts();
   const results = await checkStock();
@@ -158,32 +158,29 @@ async function buildMessage() {
 
   for (let p of products) {
     const found = results.find(r => r.asin === p.asin);
-    const safeName = escapeMarkdown(p.name);
 
     if (found && found.inStock) {
       const link = `https://www.amazon.in/dp/${p.asin}/ref=ox_sfl_cart_mbc_s1?pscz=1&aod=1`;
-      msg += `✅ [${safeName}](${link})\n\n`;
+      msg += `✅ ${p.name}\n${link}\n\n`;
     } else {
-      msg += `❌ ${safeName}\n\n`;
+      msg += `❌ ${p.name}\n\n`;
     }
   }
 
   return msg;
 }
 
-// ====== SEND STOCK ======
-async function sendStockUpdate(force = false) {
+// ====== AUTO SEND ======
+async function sendStockUpdate() {
   const msg = await buildMessage();
 
-  // 🚫 Skip duplicates only for auto run
-  if (!force) {
-    const lastMsg = await getLastMessage();
-    if (lastMsg === msg) {
-      console.log("⏭ Skipping duplicate notification");
-      return;
-    }
-    await setLastMessage(msg);
+  const lastMsg = await getLastMessage();
+  if (lastMsg === msg) {
+    console.log("⏭ Skipping duplicate notification");
+    return;
   }
+
+  await setLastMessage(msg);
 
   const users = await db.collection("users").find({ status: "approved" }).toArray();
   const allUsers = [...new Set([...users.map(u => u.userId), ...ADMIN_IDS])];
@@ -191,7 +188,6 @@ async function sendStockUpdate(force = false) {
   for (let user of allUsers) {
     try {
       await bot.telegram.sendMessage(user, msg, {
-        parse_mode: "MarkdownV2",
         disable_web_page_preview: true
       });
     } catch (e) {
@@ -216,7 +212,7 @@ bot.start(async (ctx) => {
   for (let admin of ADMIN_IDS) {
     bot.telegram.sendMessage(
       admin,
-      `New request:\nID: ${id}\nName: ${ctx.from.first_name}`,
+      `New request:\nID: ${id}`,
       Markup.inlineKeyboard([
         Markup.button.callback("✅ Accept", `accept_${id}`),
         Markup.button.callback("❌ Decline", `decline_${id}`)
@@ -255,8 +251,6 @@ bot.command("p_rm", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const asin = ctx.message.text.split(" ")[1];
-  if (!asin) return ctx.reply("Usage: /p_rm ASIN");
-
   await removeProduct(asin);
   ctx.reply("❌ Removed");
 });
@@ -279,25 +273,54 @@ bot.command("setWishlist", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const id = ctx.message.text.split(" ")[1];
-  if (!id) return ctx.reply("Usage: /setWishlist ID");
-
   await setWishlist(id);
+
   ctx.reply(`✅ Wishlist updated: ${id}`);
 });
 
-// STATUS (FIXED)
+// 🔥 FIXED STATUS (NO FAIL VERSION)
 bot.command("status", async (ctx) => {
-  if (!(await isAuthorized(ctx.from.id))) return;
+  try {
+    if (!(await isAuthorized(ctx.from.id))) {
+      return ctx.reply("❌ Not authorized");
+    }
 
-  const msg = await buildMessage();
+    await ctx.reply("🔍 Checking stock...");
 
-  await ctx.reply(msg, {
-    parse_mode: "MarkdownV2",
-    disable_web_page_preview: true
-  });
+    const products = await getProducts();
+    const results = await checkStock();
+
+    console.log("📦 Products:", products);
+    console.log("📊 Results:", results);
+
+    let msg = "📦 Amazon Stock Status:\n\n";
+
+    for (let p of products) {
+      const found = results.find(r => r.asin === p.asin);
+
+      if (found && found.inStock) {
+        const link = `https://www.amazon.in/dp/${p.asin}/ref=ox_sfl_cart_mbc_s1?pscz=1&aod=1`;
+        msg += `✅ ${p.name}\n${link}\n\n`;
+      } else {
+        msg += `❌ ${p.name}\n\n`;
+      }
+    }
+
+    if (!products.length) {
+      msg += "⚠️ No products added";
+    }
+
+    await ctx.reply(msg, {
+      disable_web_page_preview: true
+    });
+
+  } catch (err) {
+    console.log("❌ STATUS ERROR:", err);
+    await ctx.reply("❌ Error occurred. Check logs.");
+  }
 });
 
-// USER REMOVE
+// REMOVE USER
 bot.command("user_rm", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
@@ -316,7 +339,7 @@ async function safeRun() {
 
   try {
     console.log("⏱ Checking stock...");
-    await sendStockUpdate(false);
+    await sendStockUpdate();
   } catch (e) {
     console.log("Interval error:", e.message);
   }
