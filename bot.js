@@ -12,11 +12,15 @@ const { MongoClient } = require("mongodb");
 
 // ====== ENV ======
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map(Number);
+const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+  .split(",")
+  .map(id => Number(id.trim()))
+  .filter(Boolean);
+
 const MONGO_URI = process.env.MONGO_URI;
 
-if (!BOT_TOKEN || !MONGO_URI) {
-  console.error("❌ Missing ENV");
+if (!BOT_TOKEN || !MONGO_URI || ADMIN_IDS.length === 0) {
+  console.error("❌ Missing ENV variables");
   process.exit(1);
 }
 
@@ -34,9 +38,12 @@ async function connectDB() {
 }
 
 // ====== HELPERS ======
-const isAdmin = (id) => ADMIN_IDS.includes(id);
+const isAdmin = (id) => ADMIN_IDS.includes(Number(id));
 
+// ✅ FIXED AUTH (admins always allowed)
 async function isAuthorized(id) {
+  if (isAdmin(id)) return true;
+
   const user = await db.collection("users").findOne({ userId: id });
   return user && user.status === "approved";
 }
@@ -149,7 +156,7 @@ async function checkStock() {
   }
 }
 
-// ====== BUILD MESSAGE (FOR AUTO SEND ONLY) ======
+// ====== BUILD MESSAGE ======
 async function buildMessage() {
   const products = await getProducts();
   const results = await checkStock();
@@ -202,6 +209,10 @@ async function sendStockUpdate() {
 bot.start(async (ctx) => {
   const id = ctx.from.id;
 
+  if (isAdmin(id)) {
+    return ctx.reply("👑 Admin access granted");
+  }
+
   if (await isAuthorized(id)) {
     return ctx.reply("✅ Already authorized");
   }
@@ -212,7 +223,7 @@ bot.start(async (ctx) => {
   for (let admin of ADMIN_IDS) {
     bot.telegram.sendMessage(
       admin,
-      `New request:\nID: ${id}`,
+      `New request:\nID: ${id}\nName: ${ctx.from.first_name}`,
       Markup.inlineKeyboard([
         Markup.button.callback("✅ Accept", `accept_${id}`),
         Markup.button.callback("❌ Decline", `decline_${id}`)
@@ -273,12 +284,13 @@ bot.command("setWishlist", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const id = ctx.message.text.split(" ")[1];
-  await setWishlist(id);
+  if (!id) return ctx.reply("Usage: /setWishlist ID");
 
+  await setWishlist(id);
   ctx.reply(`✅ Wishlist updated: ${id}`);
 });
 
-// 🔥 FIXED STATUS (NO FAIL VERSION)
+// STATUS (FIXED)
 bot.command("status", async (ctx) => {
   try {
     if (!(await isAuthorized(ctx.from.id))) {
@@ -287,28 +299,7 @@ bot.command("status", async (ctx) => {
 
     await ctx.reply("🔍 Checking stock...");
 
-    const products = await getProducts();
-    const results = await checkStock();
-
-    console.log("📦 Products:", products);
-    console.log("📊 Results:", results);
-
-    let msg = "📦 Amazon Stock Status:\n\n";
-
-    for (let p of products) {
-      const found = results.find(r => r.asin === p.asin);
-
-      if (found && found.inStock) {
-        const link = `https://www.amazon.in/dp/${p.asin}/ref=ox_sfl_cart_mbc_s1?pscz=1&aod=1`;
-        msg += `✅ ${p.name}\n${link}\n\n`;
-      } else {
-        msg += `❌ ${p.name}\n\n`;
-      }
-    }
-
-    if (!products.length) {
-      msg += "⚠️ No products added";
-    }
+    const msg = await buildMessage();
 
     await ctx.reply(msg, {
       disable_web_page_preview: true
