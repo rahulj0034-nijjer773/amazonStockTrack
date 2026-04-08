@@ -61,7 +61,7 @@ async function removeUser(id) {
   await db.collection("users").deleteOne({ userId: id });
 }
 
-// ====== PRODUCT ======
+// ====== PRODUCT MGMT ======
 async function addProduct(asin, name) {
   await db.collection("products").updateOne(
     { asin },
@@ -92,7 +92,7 @@ async function getWishlist() {
   return c?.wishlistId;
 }
 
-// ====== LAST MESSAGE CACHE ======
+// ====== MESSAGE CACHE ======
 async function getLastMessage() {
   const c = await db.collection("config").findOne({ _id: "lastMsg" });
   return c?.text;
@@ -139,13 +139,13 @@ async function checkStock() {
     return results;
 
   } catch (e) {
-    console.log("Scrape error:", e.message);
+    console.log("❌ Scrape error:", e.message);
     return [];
   }
 }
 
-// ====== SEND STOCK ======
-async function sendStockUpdate(force = false) {
+// ====== BUILD MESSAGE ======
+async function buildMessage() {
   const products = await getProducts();
   const results = await checkStock();
 
@@ -162,32 +162,32 @@ async function sendStockUpdate(force = false) {
     }
   }
 
-  // 🔥 Skip only if NOT forced
-  if (!force) {
+  return msg;
+}
+
+// ====== SEND STOCK ======
+async function sendStockUpdate(force = false, targetUser = null) {
+  const msg = await buildMessage();
+
+  // 🚫 Skip duplicates ONLY for auto runs
+  if (!force && !targetUser) {
     const lastMsg = await getLastMessage();
     if (lastMsg === msg) {
       console.log("⏭ Skipping duplicate notification");
       return;
     }
-
     await setLastMessage(msg);
   }
 
-  const users = await db.collection("users").find({ status: "approved" }).toArray();
-  const allUsers = [...new Set([...users.map(u => u.userId), ...ADMIN_IDS])];
-
-  for (let user of allUsers) {
-    try {
-      await bot.telegram.sendMessage(user, msg, {
-        parse_mode: "Markdown",
-        disable_web_page_preview: true
-      });
-    } catch {}
+  // 🎯 If target user (like /status)
+  if (targetUser) {
+    return bot.telegram.sendMessage(targetUser, msg, {
+      parse_mode: "Markdown",
+      disable_web_page_preview: true
+    });
   }
-}
 
-  await setLastMessage(msg);
-
+  // 📢 Broadcast
   const users = await db.collection("users").find({ status: "approved" }).toArray();
   const allUsers = [...new Set([...users.map(u => u.userId), ...ADMIN_IDS])];
 
@@ -202,6 +202,8 @@ async function sendStockUpdate(force = false) {
 }
 
 // ====== COMMANDS ======
+
+// START
 bot.start(async (ctx) => {
   const id = ctx.from.id;
 
@@ -215,7 +217,7 @@ bot.start(async (ctx) => {
   for (let admin of ADMIN_IDS) {
     bot.telegram.sendMessage(
       admin,
-      `New request:\nID: ${id}`,
+      `New request:\nID: ${id}\nName: ${ctx.from.first_name}`,
       Markup.inlineKeyboard([
         Markup.button.callback("✅ Accept", `accept_${id}`),
         Markup.button.callback("❌ Decline", `decline_${id}`)
@@ -224,6 +226,7 @@ bot.start(async (ctx) => {
   }
 });
 
+// APPROVE
 bot.action(/accept_(.+)/, async (ctx) => {
   const id = Number(ctx.match[1]);
   await approveUser(id);
@@ -231,6 +234,7 @@ bot.action(/accept_(.+)/, async (ctx) => {
   ctx.editMessageText("Approved");
 });
 
+// DECLINE
 bot.action(/decline_(.+)/, async (ctx) => {
   const id = Number(ctx.match[1]);
   await removeUser(id);
@@ -238,6 +242,7 @@ bot.action(/decline_(.+)/, async (ctx) => {
   ctx.editMessageText("Declined");
 });
 
+// ADD PRODUCT
 bot.command("p_add", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
@@ -248,20 +253,24 @@ bot.command("p_add", async (ctx) => {
   ctx.reply("✅ Added");
 });
 
+// REMOVE PRODUCT
 bot.command("p_rm", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const asin = ctx.message.text.split(" ")[1];
+  if (!asin) return ctx.reply("Usage: /p_rm ASIN");
+
   await removeProduct(asin);
   ctx.reply("❌ Removed");
 });
 
+// LIST
 bot.command("list", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const products = await getProducts();
-  let msg = "📋 Products:\n\n";
 
+  let msg = "📋 Products:\n\n";
   products.forEach(p => {
     msg += `${p.asin}: ${p.name}\n`;
   });
@@ -269,28 +278,33 @@ bot.command("list", async (ctx) => {
   ctx.reply(msg);
 });
 
+// SET WISHLIST
 bot.command("setWishlist", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const id = ctx.message.text.split(" ")[1];
-  await setWishlist(id);
+  if (!id) return ctx.reply("Usage: /setWishlist ID");
 
-  ctx.reply(`✅ Wishlist set: ${id}`);
+  await setWishlist(id);
+  ctx.reply(`✅ Wishlist updated: ${id}`);
 });
 
+// STATUS (FIXED)
 bot.command("status", async (ctx) => {
   if (!(await isAuthorized(ctx.from.id))) return;
 
-  await ctx.reply("Checking...");
-  await sendStockUpdate();
+  await ctx.reply("🔍 Checking...");
+  await sendStockUpdate(true, ctx.from.id);
 });
 
+// REMOVE USER
 bot.command("user_rm", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const id = Number(ctx.message.text.split(" ")[1]);
-  await removeUser(id);
+  if (!id) return ctx.reply("Usage: /user_rm USER_ID");
 
+  await removeUser(id);
   ctx.reply("User removed");
 });
 
@@ -302,7 +316,8 @@ async function safeRun() {
   isRunning = true;
 
   try {
-    await sendStockUpdate();
+    console.log("⏱ Checking stock...");
+    await sendStockUpdate(false);
   } catch (e) {
     console.log(e.message);
   }
@@ -315,7 +330,7 @@ async function safeRun() {
   await connectDB();
   bot.launch();
 
-  console.log("🤖 Running...");
+  console.log("🤖 Bot running...");
 
   setInterval(safeRun, 60 * 1000);
 })();
