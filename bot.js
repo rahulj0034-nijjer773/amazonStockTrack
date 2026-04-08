@@ -1,10 +1,8 @@
-// ====== SAFE ENV LOAD (no crash on Railway) ======
+// ====== SAFE ENV LOAD ======
 if (process.env.NODE_ENV !== "production") {
   try {
     require("dotenv").config();
-  } catch (e) {
-    console.log("dotenv not found, skipping...");
-  }
+  } catch {}
 }
 
 const axios = require("axios");
@@ -17,9 +15,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map(Number);
 const MONGO_URI = process.env.MONGO_URI;
 
-// ====== VALIDATION ======
-if (!BOT_TOKEN || !MONGO_URI || ADMIN_IDS.length === 0) {
-  console.error("❌ Missing ENV variables");
+if (!BOT_TOKEN || !MONGO_URI) {
+  console.error("❌ Missing ENV");
   process.exit(1);
 }
 
@@ -64,7 +61,7 @@ async function removeUser(id) {
   await db.collection("users").deleteOne({ userId: id });
 }
 
-// ====== PRODUCT MGMT ======
+// ====== PRODUCT ======
 async function addProduct(asin, name) {
   await db.collection("products").updateOne(
     { asin },
@@ -91,8 +88,22 @@ async function setWishlist(id) {
 }
 
 async function getWishlist() {
-  const config = await db.collection("config").findOne({ _id: "main" });
-  return config?.wishlistId;
+  const c = await db.collection("config").findOne({ _id: "main" });
+  return c?.wishlistId;
+}
+
+// ====== LAST MESSAGE CACHE ======
+async function getLastMessage() {
+  const c = await db.collection("config").findOne({ _id: "lastMsg" });
+  return c?.text;
+}
+
+async function setLastMessage(text) {
+  await db.collection("config").updateOne(
+    { _id: "lastMsg" },
+    { $set: { text } },
+    { upsert: true }
+  );
 }
 
 // ====== SCRAPER ======
@@ -127,8 +138,8 @@ async function checkStock() {
 
     return results;
 
-  } catch (err) {
-    console.log("❌ Scrape error:", err.message);
+  } catch (e) {
+    console.log("Scrape error:", e.message);
     return [];
   }
 }
@@ -145,27 +156,36 @@ async function sendStockUpdate() {
 
     if (found && found.inStock) {
       const link = `https://www.amazon.in/dp/${p.asin}/ref=ox_sfl_cart_mbc_s1?pscz=1&aod=1`;
-      msg += `✅ ${p.name}\n${link}\n\n`;
+
+      msg += `✅ [${p.name}](${link})\n\n`;
     } else {
       msg += `❌ ${p.name}\n\n`;
     }
   }
+
+  // 🔥 CHECK DUPLICATE
+  const lastMsg = await getLastMessage();
+  if (lastMsg === msg) {
+    console.log("⏭ Skipping duplicate notification");
+    return;
+  }
+
+  await setLastMessage(msg);
 
   const users = await db.collection("users").find({ status: "approved" }).toArray();
   const allUsers = [...new Set([...users.map(u => u.userId), ...ADMIN_IDS])];
 
   for (let user of allUsers) {
     try {
-      await bot.telegram.sendMessage(user, msg);
-    } catch (e) {
-      console.log(`Failed to send to ${user}`);
-    }
+      await bot.telegram.sendMessage(user, msg, {
+        parse_mode: "Markdown",
+        disable_web_page_preview: true
+      });
+    } catch {}
   }
 }
 
 // ====== COMMANDS ======
-
-// START (approval flow)
 bot.start(async (ctx) => {
   const id = ctx.from.id;
 
@@ -174,12 +194,12 @@ bot.start(async (ctx) => {
   }
 
   await addPendingUser(id);
-  await ctx.reply("📝 Request sent to admin");
+  await ctx.reply("📝 Request sent");
 
   for (let admin of ADMIN_IDS) {
     bot.telegram.sendMessage(
       admin,
-      `New request:\nID: ${id}\nName: ${ctx.from.first_name}`,
+      `New request:\nID: ${id}`,
       Markup.inlineKeyboard([
         Markup.button.callback("✅ Accept", `accept_${id}`),
         Markup.button.callback("❌ Decline", `decline_${id}`)
@@ -188,55 +208,44 @@ bot.start(async (ctx) => {
   }
 });
 
-// APPROVE
 bot.action(/accept_(.+)/, async (ctx) => {
-  const userId = Number(ctx.match[1]);
-  await approveUser(userId);
-
-  await bot.telegram.sendMessage(userId, "✅ Approved");
+  const id = Number(ctx.match[1]);
+  await approveUser(id);
+  await bot.telegram.sendMessage(id, "✅ Approved");
   ctx.editMessageText("Approved");
 });
 
-// DECLINE
 bot.action(/decline_(.+)/, async (ctx) => {
-  const userId = Number(ctx.match[1]);
-  await removeUser(userId);
-
-  await bot.telegram.sendMessage(userId, "❌ Declined");
+  const id = Number(ctx.match[1]);
+  await removeUser(id);
+  await bot.telegram.sendMessage(id, "❌ Declined");
   ctx.editMessageText("Declined");
 });
 
-// ADD PRODUCT
 bot.command("p_add", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const match = ctx.message.text.match(/\/p_add (\w+) "(.+)"/);
-  if (!match) return ctx.reply('Format: /p_add ASIN "Product Name"');
+  if (!match) return ctx.reply('Format: /p_add ASIN "Name"');
 
-  const [, asin, name] = match;
-  await addProduct(asin, name);
-
-  ctx.reply(`✅ Added: ${name}`);
+  await addProduct(match[1], match[2]);
+  ctx.reply("✅ Added");
 });
 
-// REMOVE PRODUCT
 bot.command("p_rm", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const asin = ctx.message.text.split(" ")[1];
-  if (!asin) return ctx.reply("Usage: /p_rm ASIN");
-
   await removeProduct(asin);
-  ctx.reply(`❌ Removed: ${asin}`);
+  ctx.reply("❌ Removed");
 });
 
-// LIST PRODUCTS
 bot.command("list", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const products = await getProducts();
-
   let msg = "📋 Products:\n\n";
+
   products.forEach(p => {
     msg += `${p.asin}: ${p.name}\n`;
   });
@@ -244,33 +253,28 @@ bot.command("list", async (ctx) => {
   ctx.reply(msg);
 });
 
-// SET WISHLIST
 bot.command("setWishlist", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const id = ctx.message.text.split(" ")[1];
-  if (!id) return ctx.reply("Usage: /setWishlist ID");
-
   await setWishlist(id);
-  ctx.reply(`✅ Wishlist updated: ${id}`);
+
+  ctx.reply(`✅ Wishlist set: ${id}`);
 });
 
-// STATUS
 bot.command("status", async (ctx) => {
   if (!(await isAuthorized(ctx.from.id))) return;
 
-  await ctx.reply("🔍 Checking...");
+  await ctx.reply("Checking...");
   await sendStockUpdate();
 });
 
-// REMOVE USER
 bot.command("user_rm", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const id = Number(ctx.message.text.split(" ")[1]);
-  if (!id) return ctx.reply("Usage: /user_rm USER_ID");
-
   await removeUser(id);
+
   ctx.reply("User removed");
 });
 
@@ -282,10 +286,9 @@ async function safeRun() {
   isRunning = true;
 
   try {
-    console.log("⏱ Checking stock...");
     await sendStockUpdate();
   } catch (e) {
-    console.log("Interval error:", e.message);
+    console.log(e.message);
   }
 
   isRunning = false;
@@ -296,7 +299,7 @@ async function safeRun() {
   await connectDB();
   bot.launch();
 
-  console.log("🤖 Bot running...");
+  console.log("🤖 Running...");
 
   setInterval(safeRun, 60 * 1000);
 })();
