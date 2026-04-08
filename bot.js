@@ -145,7 +145,7 @@ async function checkStock() {
 }
 
 // ====== SEND STOCK ======
-async function sendStockUpdate() {
+async function sendStockUpdate(force = false) {
   const products = await getProducts();
   const results = await checkStock();
 
@@ -156,19 +156,35 @@ async function sendStockUpdate() {
 
     if (found && found.inStock) {
       const link = `https://www.amazon.in/dp/${p.asin}/ref=ox_sfl_cart_mbc_s1?pscz=1&aod=1`;
-
       msg += `✅ [${p.name}](${link})\n\n`;
     } else {
       msg += `❌ ${p.name}\n\n`;
     }
   }
 
-  // 🔥 CHECK DUPLICATE
-  const lastMsg = await getLastMessage();
-  if (lastMsg === msg) {
-    console.log("⏭ Skipping duplicate notification");
-    return;
+  // 🔥 Skip only if NOT forced
+  if (!force) {
+    const lastMsg = await getLastMessage();
+    if (lastMsg === msg) {
+      console.log("⏭ Skipping duplicate notification");
+      return;
+    }
+
+    await setLastMessage(msg);
   }
+
+  const users = await db.collection("users").find({ status: "approved" }).toArray();
+  const allUsers = [...new Set([...users.map(u => u.userId), ...ADMIN_IDS])];
+
+  for (let user of allUsers) {
+    try {
+      await bot.telegram.sendMessage(user, msg, {
+        parse_mode: "Markdown",
+        disable_web_page_preview: true
+      });
+    } catch {}
+  }
+}
 
   await setLastMessage(msg);
 
