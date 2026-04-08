@@ -1,4 +1,11 @@
-require("dotenv").config();
+// ====== SAFE ENV LOAD (no crash on Railway) ======
+if (process.env.NODE_ENV !== "production") {
+  try {
+    require("dotenv").config();
+  } catch (e) {
+    console.log("dotenv not found, skipping...");
+  }
+}
 
 const axios = require("axios");
 const cheerio = require("cheerio");
@@ -7,13 +14,19 @@ const { MongoClient } = require("mongodb");
 
 // ====== ENV ======
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_IDS = process.env.ADMIN_IDS.split(",").map(Number);
+const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map(Number);
 const MONGO_URI = process.env.MONGO_URI;
+
+// ====== VALIDATION ======
+if (!BOT_TOKEN || !MONGO_URI || ADMIN_IDS.length === 0) {
+  console.error("❌ Missing ENV variables");
+  process.exit(1);
+}
 
 // ====== INIT ======
 const bot = new Telegraf(BOT_TOKEN);
-
 const client = new MongoClient(MONGO_URI);
+
 let db;
 
 // ====== CONNECT DB ======
@@ -94,7 +107,8 @@ async function checkStock() {
       headers: {
         "User-Agent": "Mozilla/5.0",
         "Accept-Language": "en-IN,en;q=0.9"
-      }
+      },
+      timeout: 15000
     });
 
     const $ = cheerio.load(data);
@@ -114,7 +128,7 @@ async function checkStock() {
     return results;
 
   } catch (err) {
-    console.log("Scrape error:", err.message);
+    console.log("❌ Scrape error:", err.message);
     return [];
   }
 }
@@ -143,13 +157,15 @@ async function sendStockUpdate() {
   for (let user of allUsers) {
     try {
       await bot.telegram.sendMessage(user, msg);
-    } catch {}
+    } catch (e) {
+      console.log(`Failed to send to ${user}`);
+    }
   }
 }
 
 // ====== COMMANDS ======
 
-// START (approval)
+// START (approval flow)
 bot.start(async (ctx) => {
   const id = ctx.from.id;
 
@@ -208,8 +224,9 @@ bot.command("p_rm", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const asin = ctx.message.text.split(" ")[1];
-  await removeProduct(asin);
+  if (!asin) return ctx.reply("Usage: /p_rm ASIN");
 
+  await removeProduct(asin);
   ctx.reply(`❌ Removed: ${asin}`);
 });
 
@@ -242,7 +259,7 @@ bot.command("setWishlist", async (ctx) => {
 bot.command("status", async (ctx) => {
   if (!(await isAuthorized(ctx.from.id))) return;
 
-  await ctx.reply("Checking...");
+  await ctx.reply("🔍 Checking...");
   await sendStockUpdate();
 });
 
@@ -251,8 +268,9 @@ bot.command("user_rm", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
 
   const id = Number(ctx.message.text.split(" ")[1]);
-  await removeUser(id);
+  if (!id) return ctx.reply("Usage: /user_rm USER_ID");
 
+  await removeUser(id);
   ctx.reply("User removed");
 });
 
@@ -264,9 +282,10 @@ async function safeRun() {
   isRunning = true;
 
   try {
+    console.log("⏱ Checking stock...");
     await sendStockUpdate();
   } catch (e) {
-    console.log(e);
+    console.log("Interval error:", e.message);
   }
 
   isRunning = false;
@@ -277,7 +296,7 @@ async function safeRun() {
   await connectDB();
   bot.launch();
 
-  console.log("🤖 Bot running");
+  console.log("🤖 Bot running...");
 
   setInterval(safeRun, 60 * 1000);
 })();
