@@ -1,0 +1,14 @@
+{
+  "name": "amazon-stock-bot",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0",
+    "mongodb": "^6.0.0",
+    "telegraf": "^4.12.0"
+  }
+}
